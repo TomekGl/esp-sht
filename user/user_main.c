@@ -29,6 +29,7 @@
 */
 #include "ets_sys.h"
 #include "driver/uart.h"
+#include "driver/sht1x.h"
 #include "osapi.h"
 #include "mqtt.h"
 #include "wifi.h"
@@ -38,7 +39,20 @@
 #include "user_interface.h"
 #include "mem.h"
 
+uint16_t temp=0xffff, humidity=0xffff;
 MQTT_Client mqttClient;
+char topic[32], id[10];
+#define INTERVAL 60*1000*1000
+
+
+void disconnectAndSleep() {
+	unsigned int sleep_time;
+	INFO("\r\nGoing sleep\r\n");
+	MQTT_Disconnect(&mqttClient);
+	sleep_time = INTERVAL - system_get_time();
+	if (sleep_time>INTERVAL) sleep_time = INTERVAL;
+	system_deep_sleep(sleep_time);
+}
 
 void wifiConnectCb(uint8_t status)
 {
@@ -50,15 +64,14 @@ void wifiConnectCb(uint8_t status)
 }
 void mqttConnectedCb(uint32_t *args)
 {
+	char buf[128];
 	MQTT_Client* client = (MQTT_Client*)args;
 	INFO("MQTT: Connected\r\n");
-	MQTT_Subscribe(client, "/mqtt/topic/0", 0);
-	MQTT_Subscribe(client, "/mqtt/topic/1", 1);
-	MQTT_Subscribe(client, "/mqtt/topic/2", 2);
+	MQTT_Subscribe(client, "/esp/time", 0);
 
-	MQTT_Publish(client, "/mqtt/topic/0", "hello0", 6, 0, 0);
-	MQTT_Publish(client, "/mqtt/topic/1", "hello1", 6, 1, 0);
-	MQTT_Publish(client, "/mqtt/topic/2", "hello2", 6, 2, 0);
+	uint16_t len = os_sprintf(buf, "[{\"timestamp\": %%d, \"device\": \"%s\", \"data\": {\"raw\": 1, \"temperature\": %d, \"humidity\": %d}}]", id, temp, humidity);
+	MQTT_Publish(client, topic, buf, len, 0, 0);
+
 
 }
 
@@ -68,10 +81,48 @@ void mqttDisconnectedCb(uint32_t *args)
 	INFO("MQTT: Disconnected\r\n");
 }
 
+#ifdef UPGRADE_OTA
+upgrade_states_check_callback ota_cb(void * arg)
+{
+
+	INFO("OTA CB!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\r\n");
+}
+#define user_bin_n 1
+
+struct upgrade_server_info upServer;
+
+void checkUpgrade(struct upgrade_server_info  *server){
+	server = (struct upgrade_server_info  *)os_zalloc(sizeof(struct upgrade_server_info));
+	os_sprintf(server->pre_version, "v%d.%d", 1, 0);
+	os_sprintf(server->upgrade_version, "v%d.%d", 1, 1);
+	server->check_cb = (upgrade_states_check_callback)ota_cb;
+	server->check_times = 60000;
+	server->port = 80;
+	uint32_t otaip = ipaddr_addr("192.168.1.2");
+	os_memcpy(server->ip, &otaip, 4);
+	server->url = (uint8 *) os_zalloc(512);
+	os_sprintf(server->url,
+			"GET /v1/device/rom/?action=download_rom&version=%s&filename=user%d.bin HTTP/1.1\r\nHost: "IPSTR":%d\r\n\r\n",
+			server->upgrade_version,
+			user_bin_n,
+			IP2STR(server->ip),
+			server->port
+	);
+//	system_upgrade_userbin_check()
+	system_upgrade_init();
+	system_upgrade_start(server);
+}
+#endif
+
 void mqttPublishedCb(uint32_t *args)
 {
 	MQTT_Client* client = (MQTT_Client*)args;
 	INFO("MQTT: Published\r\n");
+	INFO("System time: %d\r\n", system_get_time());
+
+//	checkUpgrade(&upServer);
+
+	disconnectAndSleep();
 }
 
 void mqttDataCb(uint32_t *args, const char* topic, uint32_t topic_len, const char *data, uint32_t data_len)
@@ -92,19 +143,37 @@ void mqttDataCb(uint32_t *args, const char* topic, uint32_t topic_len, const cha
 	os_free(dataBuf);
 }
 
+#define HALFMAC2STR(a) (a)[3], (a)[4], (a)[5]
+#define HALFMACSTR "%02x:%02x:%02x"
+void get_device_id(char *str) {
+	char hwaddr[6];
+	wifi_get_macaddr(0, hwaddr);
+	os_sprintf(str, HALFMACSTR , HALFMAC2STR(hwaddr));
+}
+
 
 void user_init(void)
 {
-	uart_init(BIT_RATE_115200, BIT_RATE_115200);
-	os_delay_us(1000000);
 
+	int ret;
+
+	uart_init(BIT_RATE_115200, BIT_RATE_115200);
+	INFO("System time: %d\r\n", system_get_time());
+	os_delay_us(1000000);
+	gpio_init();
+	sht1x_init();
+
+	ret = sht11_measure(MEASURE_TEMP, &temp);
+	ret += sht11_measure(MEASURE_HUMI, &humidity);
 	CFG_Load();
 
+	get_device_id(id);
+	os_sprintf(topic, "/esp/sht11/%s" , id);
+//	os_sprintf(topic_humi, "/esp/%s/humidity" , id);
+
 	MQTT_InitConnection(&mqttClient, sysCfg.mqtt_host, sysCfg.mqtt_port, sysCfg.security);
-	//MQTT_InitConnection(&mqttClient, "192.168.11.122", 1880, 0);
 
 	MQTT_InitClient(&mqttClient, sysCfg.device_id, sysCfg.mqtt_user, sysCfg.mqtt_pass, sysCfg.mqtt_keepalive, 1);
-	//MQTT_InitClient(&mqttClient, "client_id", "user", "pass", 120, 1);
 
 	MQTT_InitLWT(&mqttClient, "/lwt", "offline", 0, 0);
 	MQTT_OnConnected(&mqttClient, mqttConnectedCb);
