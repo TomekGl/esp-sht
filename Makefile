@@ -9,7 +9,7 @@
 # relative to the project directory
 BUILD_BASE	= build
 FW_BASE = firmware
-ESPTOOL = tools/esptool.py
+ESPTOOL = esptool.py
 
 
 # name for the target project
@@ -65,7 +65,7 @@ else
 # We are under other system, may be Linux. Assume using gcc.
 	# Can we use -fdata-sections?
 	ESPPORT ?= /dev/ttyUSB0
-	SDK_BASE	?= /esptools/esp-open-sdk/sdk
+	SDK_BASE	?= /opt/Espressif/ESP8266_SDK
 
 	CCFLAGS += -Os -ffunction-sections -fno-jump-tables
 	AR = xtensa-lx106-elf-ar
@@ -197,7 +197,7 @@ firmware:
 	$(Q) mkdir -p $@
 
 flash: $(FW_FILE_1)  $(FW_FILE_2)
-	$(ESPTOOL) -p $(ESPPORT) write_flash $(FW_1) $(FW_FILE_1) $(FW_2) $(FW_FILE_2)
+	$(ESPTOOL) -p $(ESPPORT) -b 460800 write_flash $(FW_1) $(FW_FILE_1) $(FW_2) $(FW_FILE_2)
 
 test: flash
 	screen $(ESPPORT) 115200
